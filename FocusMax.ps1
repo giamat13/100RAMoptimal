@@ -96,12 +96,8 @@ public static extern bool EmptyWorkingSet(IntPtr hProcess);
     }
 }
 
-# Standby-list purge: same NtSetSystemInformation technique as ashishpatel26/RAMKeeper
-# (MIT License, github.com/ashishpatel26/RAMKeeper, src/cleaner.cpp). This is the RAM
-# Task Manager shows as "in use" for cached files but the OS can actually give back.
-function Invoke-PurgeStandbyList {
-    if (-not ([System.Management.Automation.PSTypeName]'PInvoke.NtMem').Type) {
-        Add-Type -Namespace PInvoke -Name NtMem -MemberDefinition @'
+if (-not ([System.Management.Automation.PSTypeName]'PInvoke.NtMem').Type) {
+    Add-Type -Namespace PInvoke -Name NtMem -MemberDefinition @'
 [DllImport("advapi32.dll", SetLastError=true)]
 public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
 [DllImport("advapi32.dll", SetLastError=true)]
@@ -110,21 +106,32 @@ public static extern bool LookupPrivilegeValue(string lpSystemName, string lpNam
 public static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, byte[] NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
 [DllImport("ntdll.dll")]
 public static extern int NtSetSystemInformation(int SystemInformationClass, IntPtr SystemInformation, int SystemInformationLength);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool SetSystemFileCacheSize(IntPtr MinimumFileCacheSize, IntPtr MaximumFileCacheSize, int Flags);
 '@
-    }
+}
 
-    # Requires SeProfileSingleProcessPrivilege enabled (admin alone isn't enough).
+# Enables a privilege (like SeProfileSingleProcessPrivilege) on our own process token -
+# admin rights alone don't grant these, they still need to be switched on explicitly.
+function Enable-Privilege {
+    param([string]$Privilege)
     $hToken = [IntPtr]::Zero
     [void][PInvoke.NtMem]::OpenProcessToken((Get-Process -Id $PID).Handle, 0x28, [ref]$hToken) # QUERY|ADJUST
     $luid = 0L
-    [void][PInvoke.NtMem]::LookupPrivilegeValue($null, 'SeProfileSingleProcessPrivilege', [ref]$luid)
+    [void][PInvoke.NtMem]::LookupPrivilegeValue($null, $Privilege, [ref]$luid)
     # TOKEN_PRIVILEGES: PrivilegeCount(4) + LUID(8) + Attributes(4), SE_PRIVILEGE_ENABLED=2
     $tp = New-Object byte[] 16
     [BitConverter]::GetBytes([int]1).CopyTo($tp, 0)
     [BitConverter]::GetBytes([long]$luid).CopyTo($tp, 4)
     [BitConverter]::GetBytes([int]2).CopyTo($tp, 12)
     [void][PInvoke.NtMem]::AdjustTokenPrivileges($hToken, $false, $tp, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+}
 
+# Standby-list purge: same NtSetSystemInformation technique as ashishpatel26/RAMKeeper
+# (MIT License, github.com/ashishpatel26/RAMKeeper, src/cleaner.cpp). This is the RAM
+# Task Manager shows as "in use" for cached files but the OS can actually give back.
+function Invoke-PurgeStandbyList {
+    Enable-Privilege 'SeProfileSingleProcessPrivilege'
     $mem = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
     try {
         [Runtime.InteropServices.Marshal]::WriteInt32($mem, 3)  # MemoryFlushModifiedList
@@ -134,6 +141,13 @@ public static extern int NtSetSystemInformation(int SystemInformationClass, IntP
     } finally {
         [Runtime.InteropServices.Marshal]::FreeHGlobal($mem)
     }
+}
+
+# Shrinks the Windows file-system cache to its working minimum (same call RAMKeeper
+# uses in ClearFileSystemCache) - frees RAM the OS is holding for cached file reads.
+function Invoke-TrimFileCache {
+    Enable-Privilege 'SeIncreaseQuotaPrivilege'
+    [void][PInvoke.NtMem]::SetSystemFileCacheSize([IntPtr]-1, [IntPtr]-1, 0)
 }
 
 function Invoke-QuickClean {
@@ -161,6 +175,9 @@ function Invoke-QuickClean {
 
     Write-Host "Purging standby list..." -ForegroundColor Cyan
     try { Invoke-PurgeStandbyList } catch { Write-Host "  (skipped: $_)" -ForegroundColor DarkYellow }
+
+    Write-Host "Trimming file-system cache..." -ForegroundColor Cyan
+    try { Invoke-TrimFileCache } catch { Write-Host "  (skipped: $_)" -ForegroundColor DarkYellow }
 
     $after = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory    # KB
     $beforeMB = [math]::Round($before / 1024)
