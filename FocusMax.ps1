@@ -180,9 +180,12 @@ function Invoke-QuickClean {
     try { Invoke-TrimFileCache } catch { Write-Host "  (skipped: $_)" -ForegroundColor DarkYellow }
 
     $after = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory    # KB
+    $totalKB = (Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize
     $beforeMB = [math]::Round($before / 1024)
     $afterMB = [math]::Round($after / 1024)
-    Write-Host "QuickClean done. Free RAM: $beforeMB MB -> $afterMB MB (freed $($afterMB - $beforeMB) MB)." -ForegroundColor Green
+    $beforePct = [math]::Round($before / $totalKB * 100)
+    $afterPct = [math]::Round($after / $totalKB * 100)
+    Write-Host "QuickClean done. Free RAM: $beforeMB MB ($beforePct%) -> $afterMB MB ($afterPct%) (freed $($afterMB - $beforeMB) MB)." -ForegroundColor Green
 }
 
 if ($Test) {
