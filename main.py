@@ -1,9 +1,13 @@
 """
 QuickClean - one-shot: deletes temp files, restarts Discord to free its RAM, purges the
-standby list and file-system cache, unless you're currently in a call.
+standby list and file-system cache, unless you're currently in a Discord call.
 
-Run (auto-elevates to admin via UAC):
+DeepClean - QuickClean plus Prefetch/Windows Update cache cleanup and `winget upgrade --all`.
+
+Run (auto-elevates to admin via UAC; asks QuickClean vs DeepClean if run with no args):
   python main.py
+  python main.py --deepclean
+  python main.py --quickclean
 Self-check:
   python main.py --test
 """
@@ -321,7 +325,7 @@ def restart_discord():
         subprocess.Popen([path])
 
 
-def run_quickclean():
+def run_quickclean(finish=True):
     before, total = free_and_total_mb()
 
     print("QuickClean: cleaning temp files...")
@@ -345,29 +349,63 @@ def run_quickclean():
     except OSError as e:
         print(f"  (skipped: {e})")
 
+    if finish:
+        after, _total = free_and_total_mb()
+        before_pct = round(before / total * 100)
+        after_pct = round(after / total * 100)
+        print(f"QuickClean done. Free RAM: {before} MB ({before_pct}%) -> {after} MB ({after_pct}%) (freed {after - before} MB).")
+        pause('Press Enter to close')
+
+    return before, total
+
+
+def run_deepclean():
+    print("DeepClean: running QuickClean first...")
+    before, total = run_quickclean(finish=False)
+
+    system_root = os.environ['SystemRoot']
+    print("DeepClean: extra cleanup...")
+    clean_temp(os.path.join(system_root, 'Prefetch'))
+    clean_temp(os.path.join(system_root, 'SoftwareDistribution', 'Download'))
+
+    print("Updating apps via winget...")
+    try:
+        subprocess.run(['winget', 'upgrade', '--all', '--accept-package-agreements', '--accept-source-agreements'])
+    except OSError as e:
+        print(f"  (skipped: {e})")
+
     after, _total = free_and_total_mb()
     before_pct = round(before / total * 100)
     after_pct = round(after / total * 100)
-    print(f"QuickClean done. Free RAM: {before} MB ({before_pct}%) -> {after} MB ({after_pct}%) (freed {after - before} MB).")
+    print(f"DeepClean done. Free RAM: {before} MB ({before_pct}%) -> {after} MB ({after_pct}%) (freed {after - before} MB).")
     pause('Press Enter to close')
 
 
 def main():
     log(f'main() start, argv={sys.argv[1:]}, is_admin={is_admin()}')
 
-    if len(sys.argv) > 1 and sys.argv[1] == '--test':
+    args = sys.argv[1:]
+
+    if args and args[0] == '--test':
         print('SELF-CHECK PASS')
         return
 
+    if not args:
+        choice = input('Run DeepClean instead of QuickClean? [y/N]: ').strip().lower()
+        args = ['--deepclean'] if choice == 'y' else ['--quickclean']
+
     if not is_admin():
-        if relaunch_as_admin(os.path.abspath(__file__), []):
+        if relaunch_as_admin(os.path.abspath(__file__), args):
             print("Opened a new elevated window - approve the UAC prompt there. This window can close.")
         else:
             print("Failed to open an elevated window (UAC declined or blocked).")
             pause('Press Enter to close')
         return
 
-    run_quickclean()
+    if args and args[0] == '--deepclean':
+        run_deepclean()
+    else:
+        run_quickclean()
 
 
 if __name__ == '__main__':
