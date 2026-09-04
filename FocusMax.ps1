@@ -1,34 +1,49 @@
 <#
-FocusMax - closes every process that is NOT approved, except Windows core processes.
-Gives the approved apps maximum performance (High priority + High Performance power plan).
+FocusMax - two modes:
+  Lockdown   - closes every process that is NOT approved, except Windows core processes.
+               Gives the approved apps maximum performance (High priority + High Performance power plan).
+               Keeps running until you press Ctrl+C.
+  QuickClean - one-shot: deletes temp files and restarts Discord to free its RAM,
+               unless you're currently in a call. Finishes in seconds, no ongoing monitoring.
 
-Run (auto-elevates to admin via UAC):
+Run (auto-elevates to admin via UAC, asks mode - and for Lockdown, allowed apps - if not given):
   powershell -ExecutionPolicy Bypass -File FocusMax.ps1
-Dry run (prints what would be killed, kills nothing - run this FIRST):
-  powershell -ExecutionPolicy Bypass -File FocusMax.ps1 -DryRun
+  powershell -ExecutionPolicy Bypass -File FocusMax.ps1 -Mode Lockdown -AllowedApps "discord.exe,cities.exe"
+  powershell -ExecutionPolicy Bypass -File FocusMax.ps1 -Mode QuickClean
+Dry run (Lockdown mode only - prints what would be killed, kills nothing - run this FIRST):
+  powershell -ExecutionPolicy Bypass -File FocusMax.ps1 -Mode Lockdown -DryRun
 Self-check:
   powershell -ExecutionPolicy Bypass -File FocusMax.ps1 -Test
-Stop: Ctrl+C.   Restore power plan: powercfg /setactive SCHEME_BALANCED
+Stop (Lockdown mode): Ctrl+C.   Restore power plan: powercfg /setactive SCHEME_BALANCED
 #>
 
-param([switch]$DryRun, [switch]$Test)
+param([ValidateSet('Lockdown', 'QuickClean')][string]$Mode, [string]$AllowedApps, [switch]$DryRun, [switch]$Test)
 
 # Keep the window open if a terminating error happens (instead of closing instantly)
 trap { Write-Host "ERROR: $_" -ForegroundColor Red; Read-Host 'Press Enter to close'; exit 1 }
 
+if (-not $Test -and -not $Mode) {
+    Write-Host "Choose mode:"
+    Write-Host "  1. Lockdown   - kills everything except approved apps, keeps running, max performance"
+    Write-Host "  2. QuickClean - one-shot: deletes temp files, restarts Discord to free RAM, then exits"
+    $Mode = if ((Read-Host "Enter 1 or 2") -eq '2') { 'QuickClean' } else { 'Lockdown' }
+}
+
+if ($Mode -eq 'Lockdown' -and -not $Test -and -not $AllowedApps) {
+    $AllowedApps = Read-Host "Which apps are allowed to keep running? (exe names, comma separated, e.g. discord.exe,cities.exe)"
+}
+
 # Auto-elevate: if not admin, relaunch this script as admin (UAC prompt)
 if (-not $Test -and -not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    $a = @('-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"")
+    $a = @('-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Mode',$Mode,'-AllowedApps',"`"$AllowedApps`"")
     if ($DryRun) { $a += '-DryRun' }
     Start-Process powershell -Verb RunAs -ArgumentList $a
     exit
 }
 
-# ==== CONFIG: apps you approve to run (exe name only, no path). Edit this. ====
-$Allowed = @(
-    'javaw.exe', 'gamingservices.exe', 'gamingservicesnet.exe'
-)
+# Apps you approve to run (exe name only, no path) - asked for at the start of every run.
+$Allowed = @($AllowedApps -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 # Any process whose image is under these folders is protected (Windows core).
 $ProtectedRoots = @("$env:SystemRoot")            # C:\Windows and everything under it
@@ -55,6 +70,104 @@ function Test-Allowed {
     return $false
 }
 
+# Discord's mic is "in use right now" when Windows recorded a start time but no stop time yet.
+function Test-DiscordInCall {
+    $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged'
+    $inCall = $false
+    Get-ChildItem $key -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match 'Discord' } | ForEach-Object {
+        if ((Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).LastUsedTimeStop -eq 0) { $inCall = $true }
+    }
+    $inCall
+}
+
+$DiscordNames = @('Discord', 'DiscordPTB', 'DiscordCanary')
+
+# Trims each process's working set back to Windows, forcing it to give up idle RAM pages.
+function Invoke-TrimWorkingSets {
+    if (-not ([System.Management.Automation.PSTypeName]'PInvoke.Win32').Type) {
+        Add-Type -Name Win32 -Namespace PInvoke -MemberDefinition @'
+[DllImport("psapi.dll")]
+public static extern bool EmptyWorkingSet(IntPtr hProcess);
+'@
+    }
+    foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
+        if ($ProtectedNames -contains "$($proc.Name).exe") { continue }
+        try { [PInvoke.Win32]::EmptyWorkingSet($proc.Handle) | Out-Null } catch {}
+    }
+}
+
+# Standby-list purge: same NtSetSystemInformation technique as ashishpatel26/RAMKeeper
+# (MIT License, github.com/ashishpatel26/RAMKeeper, src/cleaner.cpp). This is the RAM
+# Task Manager shows as "in use" for cached files but the OS can actually give back.
+function Invoke-PurgeStandbyList {
+    if (-not ([System.Management.Automation.PSTypeName]'PInvoke.NtMem').Type) {
+        Add-Type -Namespace PInvoke -Name NtMem -MemberDefinition @'
+[DllImport("advapi32.dll", SetLastError=true)]
+public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+[DllImport("advapi32.dll", SetLastError=true)]
+public static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out long lpLuid);
+[DllImport("advapi32.dll", SetLastError=true)]
+public static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, bool DisableAllPrivileges, byte[] NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
+[DllImport("ntdll.dll")]
+public static extern int NtSetSystemInformation(int SystemInformationClass, IntPtr SystemInformation, int SystemInformationLength);
+'@
+    }
+
+    # Requires SeProfileSingleProcessPrivilege enabled (admin alone isn't enough).
+    $hToken = [IntPtr]::Zero
+    [void][PInvoke.NtMem]::OpenProcessToken((Get-Process -Id $PID).Handle, 0x28, [ref]$hToken) # QUERY|ADJUST
+    $luid = 0L
+    [void][PInvoke.NtMem]::LookupPrivilegeValue($null, 'SeProfileSingleProcessPrivilege', [ref]$luid)
+    # TOKEN_PRIVILEGES: PrivilegeCount(4) + LUID(8) + Attributes(4), SE_PRIVILEGE_ENABLED=2
+    $tp = New-Object byte[] 16
+    [BitConverter]::GetBytes([int]1).CopyTo($tp, 0)
+    [BitConverter]::GetBytes([long]$luid).CopyTo($tp, 4)
+    [BitConverter]::GetBytes([int]2).CopyTo($tp, 12)
+    [void][PInvoke.NtMem]::AdjustTokenPrivileges($hToken, $false, $tp, 0, [IntPtr]::Zero, [IntPtr]::Zero)
+
+    $mem = [Runtime.InteropServices.Marshal]::AllocHGlobal(4)
+    try {
+        [Runtime.InteropServices.Marshal]::WriteInt32($mem, 3)  # MemoryFlushModifiedList
+        [PInvoke.NtMem]::NtSetSystemInformation(80, $mem, 4) | Out-Null  # SystemMemoryListInformation
+        [Runtime.InteropServices.Marshal]::WriteInt32($mem, 4)  # MemoryPurgeStandbyList
+        [PInvoke.NtMem]::NtSetSystemInformation(80, $mem, 4) | Out-Null
+    } finally {
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($mem)
+    }
+}
+
+function Invoke-QuickClean {
+    $before = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory   # KB
+
+    Write-Host "QuickClean: cleaning temp files..." -ForegroundColor Cyan
+    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item "$env:SystemRoot\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+    $discord = Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $discord) {
+        Write-Host "Discord isn't running - skipping restart." -ForegroundColor Yellow
+    } elseif (Test-DiscordInCall) {
+        Write-Host "You're in a Discord call - leaving it running." -ForegroundColor Yellow
+    } else {
+        $path = $discord.Path
+        Write-Host "Restarting $($discord.Name)..." -ForegroundColor Cyan
+        Get-Process -Name $DiscordNames -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        if ($path) { Start-Process $path }
+    }
+
+    Write-Host "Trimming memory of running apps..." -ForegroundColor Cyan
+    Invoke-TrimWorkingSets
+
+    Write-Host "Purging standby list..." -ForegroundColor Cyan
+    try { Invoke-PurgeStandbyList } catch { Write-Host "  (skipped: $_)" -ForegroundColor DarkYellow }
+
+    $after = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory    # KB
+    $beforeMB = [math]::Round($before / 1024)
+    $afterMB = [math]::Round($after / 1024)
+    Write-Host "QuickClean done. Free RAM: $beforeMB MB -> $afterMB MB (freed $($afterMB - $beforeMB) MB)." -ForegroundColor Green
+}
+
 if ($Test) {
     $Allowed = @('game.exe'); $ok = 0
     if (Test-Allowed 'game.exe' 'D:\x\game.exe') { $ok++ }                              # approved
@@ -62,6 +175,12 @@ if ($Test) {
     if (Test-Allowed 'notepad.exe' "$env:SystemRoot\System32\notepad.exe") { $ok++ }    # Windows protected
     if (Test-Allowed 'lsass.exe' 'C:\weird\lsass.exe') { $ok++ }                        # protected name
     if ($ok -eq 4) { 'SELF-CHECK PASS' } else { throw "SELF-CHECK FAIL ($ok/4)" }
+    return
+}
+
+if ($Mode -eq 'QuickClean') {
+    Invoke-QuickClean
+    Read-Host 'Press Enter to close'
     return
 }
 
