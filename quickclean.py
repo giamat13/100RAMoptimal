@@ -64,11 +64,14 @@ def trim_working_sets():
 
 
 # Standby-list purge: same NtSetSystemInformation technique as ashishpatel26/RAMKeeper
-# (MIT License, github.com/ashishpatel26/RAMKeeper, src/cleaner.cpp). This is the RAM
-# Task Manager shows as "in use" for cached files but the OS can actually give back.
+# (MIT License, github.com/ashishpatel26/RAMKeeper, src/cleaner.cpp) and henrypp/memreduct
+# (MIT License, github.com/henrypp/memreduct). This is the RAM Task Manager shows as
+# "in use" for cached files but the OS can actually give back. MemoryEmptyWorkingSets (2)
+# is the same system-wide trim memreduct/RAMMap use for their "Empty Working Sets" button -
+# it reaches processes trim_working_sets() can't OpenProcess into (other users, protected).
 def purge_standby_list():
     enable_privilege('SeProfileSingleProcessPrivilege')
-    for command in (3, 4):  # MemoryFlushModifiedList, MemoryPurgeStandbyList
+    for command in (2, 3, 4):  # MemoryEmptyWorkingSets, MemoryFlushModifiedList, MemoryPurgeStandbyList
         cmd = ctypes.c_int(command)
         ntdll.NtSetSystemInformation(80, ctypes.byref(cmd), ctypes.sizeof(cmd))  # SystemMemoryListInformation
 
