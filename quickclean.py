@@ -53,7 +53,11 @@ def discord_in_call():
 
 
 def trim_working_sets():
-    """Trims each process's working set back to Windows, forcing it to give up idle RAM pages."""
+    """Trims each process's working set back to Windows, forcing it to give up idle RAM pages.
+    SeDebugPrivilege (same one memreduct enables) is needed to OpenProcess into processes we
+    don't own - other users' sessions, elevated processes - not just our own; without it
+    those silently fail to open and get skipped."""
+    enable_privilege('SeDebugPrivilege')
     for pid, _ppid, name in enum_processes():
         if name.lower() in (p.lower() for p in PROTECTED_NAMES):
             continue
