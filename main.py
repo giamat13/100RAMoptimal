@@ -345,8 +345,6 @@ def run_quickclean(finish=True):
     clean_temp(os.path.join(os.environ['ProgramData'], 'Microsoft', 'Windows', 'WER', 'ReportQueue'))
     clean_temp(os.path.join(os.environ['ProgramData'], 'Microsoft', 'Windows', 'WER', 'ReportArchive'))
 
-    restart_discord()
-
     print("Trimming memory of running apps...")
     trim_working_sets()
 
