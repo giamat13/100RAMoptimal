@@ -1,8 +1,10 @@
 """
-QuickClean - one-shot: deletes temp files, restarts Discord to free its RAM, purges the
-standby list and file-system cache, unless you're currently in a Discord call.
+QuickClean - one-shot: deletes temp files (user temp, Prefetch, Windows Update cache,
+error reports), restarts Discord to free its RAM, purges the standby list and
+file-system cache, unless you're currently in a Discord call.
 
-DeepClean - QuickClean plus Prefetch/Windows Update cache cleanup and `winget upgrade --all`.
+DeepClean - QuickClean plus empties the Recycle Bin, flushes DNS, and runs
+`winget upgrade --all`.
 
 Run (auto-elevates to admin via UAC; asks QuickClean vs DeepClean if run with no args):
   python main.py
@@ -129,6 +131,12 @@ advapi32.AdjustTokenPrivileges.argtypes = [wintypes.HANDLE, wintypes.BOOL, ctype
 shell32.IsUserAnAdmin.restype = wintypes.BOOL
 shell32.ShellExecuteW.restype = ctypes.c_void_p
 shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+shell32.SHEmptyRecycleBinW.restype = ctypes.c_long
+shell32.SHEmptyRecycleBinW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.DWORD]
+
+SHERB_NOCONFIRMATION = 0x00000001
+SHERB_NOPROGRESSUI = 0x00000002
+SHERB_NOSOUND = 0x00000004
 
 # Safety net: names never touched.
 PROTECTED_NAMES = [
@@ -328,9 +336,14 @@ def restart_discord():
 def run_quickclean(finish=True):
     before, total = free_and_total_mb()
 
+    system_root = os.environ['SystemRoot']
     print("QuickClean: cleaning temp files...")
     clean_temp(os.environ['TEMP'])
-    clean_temp(os.path.join(os.environ['SystemRoot'], 'Temp'))
+    clean_temp(os.path.join(system_root, 'Temp'))
+    clean_temp(os.path.join(system_root, 'Prefetch'))
+    clean_temp(os.path.join(system_root, 'SoftwareDistribution', 'Download'))
+    clean_temp(os.path.join(os.environ['ProgramData'], 'Microsoft', 'Windows', 'WER', 'ReportQueue'))
+    clean_temp(os.path.join(os.environ['ProgramData'], 'Microsoft', 'Windows', 'WER', 'ReportArchive'))
 
     restart_discord()
 
@@ -363,10 +376,12 @@ def run_deepclean():
     print("DeepClean: running QuickClean first...")
     before, total = run_quickclean(finish=False)
 
-    system_root = os.environ['SystemRoot']
     print("DeepClean: extra cleanup...")
-    clean_temp(os.path.join(system_root, 'Prefetch'))
-    clean_temp(os.path.join(system_root, 'SoftwareDistribution', 'Download'))
+    print("Emptying Recycle Bin...")
+    shell32.SHEmptyRecycleBinW(None, None, SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND)
+
+    print("Flushing DNS cache...")
+    subprocess.run(['ipconfig', '/flushdns'])
 
     print("Updating apps via winget (can take a few minutes - don't close this window)...")
     winget_start = time.monotonic()
