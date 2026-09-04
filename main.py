@@ -368,11 +368,16 @@ def run_deepclean():
     clean_temp(os.path.join(system_root, 'Prefetch'))
     clean_temp(os.path.join(system_root, 'SoftwareDistribution', 'Download'))
 
-    print("Updating apps via winget...")
+    print("Updating apps via winget (can take a few minutes - don't close this window)...")
+    winget_start = time.monotonic()
     try:
-        subprocess.run(['winget', 'upgrade', '--all', '--accept-package-agreements', '--accept-source-agreements'])
+        subprocess.run([
+            'winget', 'upgrade', '--all',
+            '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity',
+        ])
     except OSError as e:
         print(f"  (skipped: {e})")
+    log(f'winget upgrade took {time.monotonic() - winget_start:.0f}s')
 
     after, _total = free_and_total_mb()
     before_pct = round(before / total * 100)
