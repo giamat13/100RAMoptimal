@@ -227,14 +227,16 @@ def is_admin():
 
 
 def relaunch_as_admin(script_path, extra_args):
-    # Elevate cmd.exe /k itself (not python.exe directly) - /k keeps the console open
-    # after the command finishes no matter what, so a crash can't silently vanish the window.
+    # Elevate cmd.exe /c itself (not python.exe directly) - /c closes the console as soon
+    # as the command finishes, so a successful run's window disappears on its own. Errors
+    # still stay visible: main()'s pause() blocks on a keypress before python exits, and
+    # only once it returns does /c close the window.
     inner = ' '.join(f'"{a}"' for a in [sys.executable, script_path] + extra_args)
     # cmd's /k quote parsing: with more than one quoted token it strips only the very
     # first and last quote of the whole line, corrupting it. Wrapping the whole thing
     # in one more pair of quotes gives cmd that outer pair to strip instead, leaving
     # `inner` intact. (Classic cmd.exe /C-/K quoting bug - see `cmd /?`.)
-    result = shell32.ShellExecuteW(None, 'runas', 'cmd.exe', f'/k "{inner}"', None, 1)
+    result = shell32.ShellExecuteW(None, 'runas', 'cmd.exe', f'/c "{inner}"', None, 1)
     return result > 32  # per MSDN, <=32 means ShellExecuteW failed
 
 
@@ -365,7 +367,6 @@ def run_quickclean(finish=True):
         before_pct = round(before / total * 100)
         after_pct = round(after / total * 100)
         print(f"QuickClean done. Free RAM: {before} MB ({before_pct}%) -> {after} MB ({after_pct}%) (freed {after - before} MB).")
-        pause('Press Enter to close')
 
     return before, total
 
@@ -396,7 +397,6 @@ def run_deepclean():
     before_pct = round(before / total * 100)
     after_pct = round(after / total * 100)
     print(f"DeepClean done. Free RAM: {before} MB ({before_pct}%) -> {after} MB ({after_pct}%) (freed {after - before} MB).")
-    pause('Press Enter to close')
 
 
 def main():
